@@ -99,6 +99,41 @@ def stack_number_type(x):
     return x
 
 
+def mfbd_iterations_type(x):
+    x = int(x)
+    if not 1 <= x <= 100:
+        raise ArgumentTypeError("Number of MFBD iterations must be between 1 and 100")
+    return x
+
+
+def mfbd_percent_type(x):
+    x = int(x)
+    if not 1 <= x <= 100:
+        raise ArgumentTypeError("Percentage of frames used by MFBD must be between 1 and 100")
+    return x
+
+
+def mfbd_patch_size_type(x):
+    x = int(x)
+    if not 16 <= x <= 512:
+        raise ArgumentTypeError("MFBD patch size must be between 16 and 512 pixels")
+    return x
+
+
+def mfbd_psf_size_type(x):
+    x = int(x)
+    if not 3 <= x <= 99 or x % 2 == 0:
+        raise ArgumentTypeError("MFBD PSF size must be an odd number between 3 and 99 pixels")
+    return x
+
+
+def mfbd_jump_type(x):
+    x = float(x)
+    if not 0. <= x:
+        raise ArgumentTypeError("MFBD jump threshold must not be negative (0 = off)")
+    return x
+
+
 def normalize_bco_type(x):
     x = int(x)
     if not 0 <= x <= 40:
@@ -207,6 +242,21 @@ class PssConsole(QtCore.QObject):
         parser.add_argument("--drizzle", choices=["Off", "1.5x", "2x", "3x"], default="Off",
                             help="Drizzle factor (Off, 1.5x, 2x, 3x)")
 
+        parser.add_argument("--mfbd", action="store_true",
+                            help="Also deconvolve all frames jointly (multi-frame blind "
+                                 "deconvolution); the result is saved with suffix '_mfbd'")
+        parser.add_argument("--mfbd_iterations", type=mfbd_iterations_type, default=8,
+                            help="MFBD iterations (each is one pass over all frames)")
+        parser.add_argument("--mfbd_percent", type=mfbd_percent_type, default=100,
+                            help="Percentage of best frames used by MFBD")
+        parser.add_argument("--mfbd_patch_size", type=mfbd_patch_size_type, default=64,
+                            help="MFBD patch size (pixels)")
+        parser.add_argument("--mfbd_psf_size", type=mfbd_psf_size_type, default=21,
+                            help="MFBD PSF support (pixels, odd)")
+        parser.add_argument("--mfbd_jump", type=mfbd_jump_type, default=0.,
+                            help="MFBD: drop frames next to a jump of the global alignment larger "
+                                 "than this (pixels, e.g. mount corrections; 0 = off)")
+
         arguments = parser.parse_args()
         # self.print_arguments(arguments)
 
@@ -269,6 +319,14 @@ class PssConsole(QtCore.QObject):
         self.configuration.frames_normalization = arguments.normalize_bright
         self.configuration.frames_normalization_threshold = arguments.normalize_bco
         self.configuration.stack_frames_drizzle_factor_string = arguments.drizzle
+
+        self.configuration.mfbd_activated = arguments.mfbd
+        self.configuration.mfbd_iterations = arguments.mfbd_iterations
+        self.configuration.mfbd_frame_percent = arguments.mfbd_percent
+        self.configuration.mfbd_patch_size = arguments.mfbd_patch_size
+        self.configuration.mfbd_patch_step = max(arguments.mfbd_patch_size // 2, 1)
+        self.configuration.mfbd_psf_size = arguments.mfbd_psf_size
+        self.configuration.mfbd_jump_threshold = arguments.mfbd_jump
 
         # Re-compute derived parameters after the configuration was changed.
         self.configuration.set_derived_parameters()
@@ -502,6 +560,14 @@ class PssConsole(QtCore.QObject):
         print("Number of best frames to be stacked: " + str(arguments.stack_number))
         print("Normalize frame brightness: " + str(arguments.normalize_bright))
         print("Normalization black cut-off: " + str(arguments.normalize_bco))
+        print("")
+        print("Multi-frame blind deconvolution: " + str(arguments.mfbd))
+        if arguments.mfbd:
+            print("MFBD iterations: " + str(arguments.mfbd_iterations))
+            print("MFBD percentage of frames: " + str(arguments.mfbd_percent))
+            print("MFBD patch size (pixels): " + str(arguments.mfbd_patch_size))
+            print("MFBD PSF size (pixels): " + str(arguments.mfbd_psf_size))
+            print("MFBD jump threshold (pixels): " + str(arguments.mfbd_jump))
 
     def stop_execution(self):
         """

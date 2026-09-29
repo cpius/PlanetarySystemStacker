@@ -35,6 +35,7 @@ from alignment_points import AlignmentPoints
 from configuration import PostprocDataObject
 from exceptions import NotSupportedError, InternalError, ArgumentError, Error
 from frames import Frames, Calibration
+from mfbd import MultiFrameBlindDeconvolution
 from miscellaneous import Miscellaneous
 from rank_frames import RankFrames
 from stack_frames import StackFrames
@@ -69,6 +70,8 @@ class Workflow(QtCore.QObject):
         self.alignment_points = None
         self.stack_frames = None
         self.stacked_image_name = None
+        self.mfbd_image = None
+        self.mfbd_image_name = None
         self.postprocessed_image_name = None
         self.postprocessed_image = None
         self.postproc_input_image = None
@@ -812,6 +815,31 @@ class Workflow(QtCore.QObject):
         if self.configuration.drizzle_factor_is_1_5:
             self.stack_frames.half_stacked_image_buffer_resolution()
 
+        # Optionally, deconvolve all frames jointly (multi-frame blind deconvolution). The result
+        # has the geometry of the stacked image and is saved next to it.
+        self.mfbd_image = None
+        if self.configuration.mfbd_activated:
+            self.set_status_bar_processing_phase("multi-frame blind deconvolution")
+            if self.configuration.global_parameters_protocol_level > 0:
+                Miscellaneous.protocol("+++ Start multi-frame blind deconvolution +++",
+                                       self.attached_log_file)
+            self.my_timer.create_no_check('Multi-frame blind deconvolution')
+            try:
+                mfbd = MultiFrameBlindDeconvolution(self.configuration, self.frames,
+                                                    self.rank_frames, self.align_frames,
+                                                    progress_signal=self.work_current_progress_signal,
+                                                    logfile=self.attached_log_file)
+                self.mfbd_image = mfbd.deconvolve_and_transfer(self.stack_frames)
+            except Error as e:
+                self.abort_job_signal.emit("Error: " + e.message + ", continuing with next job")
+                return
+            except Exception as e:
+                self.abort_job_signal.emit(
+                    "Error in multi-frame blind deconvolution: " + str(e) +
+                    ", continuing with next job")
+                return
+            self.my_timer.stop('Multi-frame blind deconvolution')
+
         self.work_next_task_signal.emit("Save stacked image")
 
     @QtCore.pyqtSlot()
@@ -844,6 +872,19 @@ class Workflow(QtCore.QObject):
                 "           The stacked image was written to: " + self.stacked_image_name,
                 self.attached_log_file, precede_with_timestamp=False)
 
+        # If multi-frame blind deconvolution was done, save its result next to the stacked image. It
+        # then also is the input for postprocessing.
+        if self.mfbd_image is not None:
+            name, extension = splitext(self.stacked_image_name)
+            self.mfbd_image_name = name + self.configuration.mfbd_suffix + extension
+            Frames.save_image(self.mfbd_image_name, self.mfbd_image, color=self.frames.color,
+                              avoid_overwriting=False,
+                              header=self.configuration.global_parameters_version)
+            if self.configuration.global_parameters_protocol_level > 1:
+                Miscellaneous.protocol(
+                    "           The MFBD image was written to: " + self.mfbd_image_name,
+                    self.attached_log_file, precede_with_timestamp=False)
+
         # If parameter info is to be included in output file names, compose the new name for
         # the attached log file. The existing file will be renamed after closing.
         if self.attached_log_file:
@@ -852,10 +893,14 @@ class Workflow(QtCore.QObject):
 
         # If postprocessing is included after stacking, set the stacked image as input.
         if self.configuration.global_parameters_include_postprocessing:
-            self.postproc_input_image = self.stack_frames.stacked_image
-            self.postproc_input_name = self.stacked_image_name
+            if self.mfbd_image is not None:
+                self.postproc_input_image = self.mfbd_image
+                self.postproc_input_name = self.mfbd_image_name
+            else:
+                self.postproc_input_image = self.stack_frames.stacked_image
+                self.postproc_input_name = self.stacked_image_name
             self.postprocessed_image_name = PostprocDataObject.set_file_name_processed(
-                self.stacked_image_name, self.configuration.postproc_suffix,
+                self.postproc_input_name, self.configuration.postproc_suffix,
                 self.configuration.global_parameters_image_format)
             self.work_next_task_signal.emit("Postprocessing")
         else:

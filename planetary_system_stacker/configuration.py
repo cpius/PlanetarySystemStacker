@@ -249,6 +249,27 @@ class Configuration(object):
         self.stack_frames_background_fraction = 0.3
         self.stack_frames_background_patch_size = 100
 
+        # Multi-frame blind deconvolution (module mfbd), an alternative to shift-and-add stacking.
+        # Switched on per run (command line option "--mfbd"); sizes are in pixels of the frames.
+        self.mfbd_activated = False
+        self.mfbd_suffix = "_mfbd"
+        self.mfbd_iterations = 8
+        self.mfbd_frame_percent = 100
+        self.mfbd_init_percent = 10.
+        self.mfbd_patch_size = 64
+        self.mfbd_patch_step = 32
+        self.mfbd_psf_size = 21
+        self.mfbd_psf_iterations_first = 6
+        self.mfbd_psf_iterations_later = 2
+        self.mfbd_ratio_clip = 2.
+        self.mfbd_min_support = 0.05
+        self.mfbd_local_warp = True
+        self.mfbd_warp_order = 2
+        self.mfbd_local_refresh = 8
+        self.mfbd_local_max_shift = 4.
+        self.mfbd_jump_threshold = 0.
+        self.mfbd_align_red_onto_green = True
+
         self.postproc_suffix = "_gpp"
         self.postproc_max_layers = 10
         self.postproc_bi_range_standard = 13
