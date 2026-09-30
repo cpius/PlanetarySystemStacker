@@ -41,7 +41,10 @@ This implementation is a batch multi-frame Richardson-Lucy scheme:
     refined to sub-pixel accuracy against a reference. Optionally, frames recorded during a jump
     of the global alignment (e.g. a mount correction) are dropped.
   * Colour frames are reduced to an R+G luminance after moving R onto G (atmospheric dispersion is
-    measured once on the mean frame). Mono frames are used at full resolution.
+    measured once on the mean frame). Optionally ("mfbd_binning" 2, recommended for one-shot colour
+    cameras) the luminance is binned 2x2, like a Bayer superpixel: each processing pixel then
+    carries four times the signal, which the per-frame PSF estimation needs. The result is
+    upsampled back to the frames' resolution.
   * The canvas is cut into overlapping patches (seeing differs across the field). In every
     iteration, for every frame: its local tip-tilt is removed by one smooth polynomial warp fitted
     to per-patch shifts, a few multiplicative updates of its PSF per patch are done (non-negative,
@@ -109,13 +112,17 @@ class MultiFrameBlindDeconvolution(object):
         self.progress_signal = progress_signal
         self.logfile = logfile
 
-        # Patch geometry (pixels of the frames). The patch must be large enough to hold several
-        # PSF widths.
-        self.patch_size = configuration.mfbd_patch_size
-        self.patch_step = configuration.mfbd_patch_step
-        self.psf_size = configuration.mfbd_psf_size
+        # Patch geometry. The sizes are given in pixels of the frames and converted to processing
+        # pixels (binned). The PSF size must be odd, and the patch large enough to hold several PSF
+        # widths.
+        self.binning = configuration.mfbd_binning
+        if self.binning not in (1, 2):
+            raise ArgumentError("MFBD binning must be 1 or 2, got " + str(self.binning))
+        self.patch_size = int(round(configuration.mfbd_patch_size / self.binning))
+        self.patch_step = max(self.patch_size // 2, 1)
+        self.psf_size = configuration.mfbd_psf_size // self.binning
         if self.psf_size % 2 != 1:
-            raise ArgumentError("MFBD PSF size must be odd, got " + str(self.psf_size))
+            self.psf_size += 1
         if self.patch_size < 2 * self.psf_size:
             raise ArgumentError("MFBD patch size (" + str(self.patch_size) + ") must be at least "
                                 "twice the PSF size (" + str(self.psf_size) + ")")
@@ -128,6 +135,7 @@ class MultiFrameBlindDeconvolution(object):
         self.sky = 0.
         self.frame_stack = None
         self.frame_stack_warped = None
+        self.full_canvas_height = self.full_canvas_width = None
         self.canvas_height = self.canvas_width = None
         self.start_image = None
         self.patch_corners = None
@@ -225,6 +233,52 @@ class MultiFrameBlindDeconvolution(object):
         shift_y, shift_x = (int(round(value)) for value in self.align_frames.frame_shifts[index])
         return frame[intersection[0][0] - shift_y:intersection[0][1] - shift_y,
                      intersection[1][0] - shift_x:intersection[1][1] - shift_x]
+
+    def bin_image(self, image):
+        """
+        Bin an image by the factor "self.binning" (mean of binning x binning pixels). Rows and
+        columns which do not fill a bin are dropped.
+
+        :param image: 2D image
+        :return: Binned image (the input itself if the binning is 1)
+        """
+
+        if self.binning == 1:
+            return image
+        binning = self.binning
+        height, width = image.shape[0] // binning, image.shape[1] // binning
+        return image[:height * binning, :width * binning].reshape(
+            height, binning, width, binning).mean(axis=(1, 3))
+
+    def upsample_to_canvas(self, image):
+        """
+        Undo the binning of a result: upsample it by zero-padding its spectrum (exact for
+        band-limited images), move it by (binning - 1) / 2 pixels (a binned pixel is centred
+        between the pixels it was made from), and replicate the edge where the binning dropped a
+        row or column.
+
+        :param image: Binned 2D image
+        :return: Image with the size of the full intersection canvas
+        """
+
+        if self.binning == 1:
+            return image
+        binning = self.binning
+        height, width = image.shape
+
+        # The zero frequency of a centred spectrum of length n sits at n // 2, both before and after
+        # padding.
+        spectrum = fftshift(fft2(image))
+        padded = zeros((height * binning, width * binning), dtype=spectrum.dtype)
+        offset_y = (height * binning) // 2 - height // 2
+        offset_x = (width * binning) // 2 - width // 2
+        padded[offset_y:offset_y + height, offset_x:offset_x + width] = spectrum
+        padded = ifftshift(padded)
+        shift = (binning - 1) / 2.
+        upsampled = (ifft2(ndimage.fourier_shift(padded, (shift, shift))).real *
+                     binning * binning).astype(float32)
+        return pad(upsampled, ((0, self.full_canvas_height - upsampled.shape[0]),
+                               (0, self.full_canvas_width - upsampled.shape[1])), mode="edge")
 
     @staticmethod
     def normalized_blur(image):
@@ -371,8 +425,12 @@ class MultiFrameBlindDeconvolution(object):
             self.measure_dispersion(
                 self.used_indices[:max(number_reference, min(len(self.used_indices), 50))])
 
-        # Put the luminance of all used frames onto the canvas.
-        self.frame_stack = stack([self.cut_to_canvas(self.frame_luminance(index), index)
+        # Put the luminance of all used frames onto the canvas, and bin it (if requested).
+        intersection = self.align_frames.intersection_shape
+        self.full_canvas_height = intersection[0][1] - intersection[0][0]
+        self.full_canvas_width = intersection[1][1] - intersection[1][0]
+        self.frame_stack = stack([self.bin_image(self.cut_to_canvas(self.frame_luminance(index),
+                                                                    index))
                                   for index in self.used_indices])
         self.canvas_height, self.canvas_width = self.frame_stack.shape[1:]
         if min(self.canvas_height, self.canvas_width) < self.patch_size:
@@ -402,7 +460,8 @@ class MultiFrameBlindDeconvolution(object):
             self.frame_stack[frame_index] = self.shift_image(self.frame_stack[frame_index], shift_y,
                                                              shift_x)
         self.protocol("           MFBD: " + str(len(self.used_indices)) + " frames on a " +
-                      str(self.canvas_width) + "x" + str(self.canvas_height) + " canvas, sky " +
+                      str(self.canvas_width) + "x" + str(self.canvas_height) + " canvas (binning " +
+                      str(self.binning) + "), sky " +
                       "%.1f" % self.sky + ", sub-pixel residual of the global alignment median "
                       "%.2f px" % float(median(residuals)), level=2)
 
@@ -819,7 +878,8 @@ class MultiFrameBlindDeconvolution(object):
         """
         Run MFBD on the intersection canvas.
 
-        :return: Sky-free float32 luminance on the intersection canvas (in the frames' units)
+        :return: Sky-free float32 luminance on the (binned) intersection canvas, in the frames'
+                 units
         """
 
         self.my_timer.start('MFBD: reading and aligning frames')
@@ -846,6 +906,7 @@ class MultiFrameBlindDeconvolution(object):
 
         luminance = self.deconvolve() if self.luminance is None else self.luminance
         self.my_timer.start('MFBD: blending and transfer')
+        luminance = self.upsample_to_canvas(luminance)
         stacked = stack_frames.stacked_image.astype(float32) / 65535.
 
         # Same geometry as the stacked image: drizzle, then the borders StackFrames trimmed.

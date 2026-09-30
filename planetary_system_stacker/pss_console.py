@@ -249,10 +249,13 @@ class PssConsole(QtCore.QObject):
                             help="MFBD iterations (each is one pass over all frames)")
         parser.add_argument("--mfbd_percent", type=mfbd_percent_type, default=100,
                             help="Percentage of best frames used by MFBD")
-        parser.add_argument("--mfbd_patch_size", type=mfbd_patch_size_type, default=64,
+        parser.add_argument("--mfbd_patch_size", type=mfbd_patch_size_type, default=80,
                             help="MFBD patch size (pixels)")
         parser.add_argument("--mfbd_psf_size", type=mfbd_psf_size_type, default=21,
                             help="MFBD PSF support (pixels, odd)")
+        parser.add_argument("--mfbd_binning", type=int, choices=[1, 2], default=1,
+                            help="MFBD: bin the luminance 2x2 before deconvolving (recommended for "
+                                 "one-shot colour cameras)")
         parser.add_argument("--mfbd_jump", type=mfbd_jump_type, default=0.,
                             help="MFBD: drop frames next to a jump of the global alignment larger "
                                  "than this (pixels, e.g. mount corrections; 0 = off)")
@@ -326,6 +329,7 @@ class PssConsole(QtCore.QObject):
         self.configuration.mfbd_patch_size = arguments.mfbd_patch_size
         self.configuration.mfbd_psf_size = arguments.mfbd_psf_size
         self.configuration.mfbd_jump_threshold = arguments.mfbd_jump
+        self.configuration.mfbd_binning = arguments.mfbd_binning
 
         # Re-compute derived parameters after the configuration was changed.
         self.configuration.set_derived_parameters()
@@ -567,6 +571,7 @@ class PssConsole(QtCore.QObject):
             print("MFBD patch size (pixels): " + str(arguments.mfbd_patch_size))
             print("MFBD PSF size (pixels): " + str(arguments.mfbd_psf_size))
             print("MFBD jump threshold (pixels): " + str(arguments.mfbd_jump))
+            print("MFBD binning: " + str(arguments.mfbd_binning))
 
     def stop_execution(self):
         """

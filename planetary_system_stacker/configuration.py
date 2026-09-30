@@ -85,6 +85,7 @@ class ConfigurationParameters(object):
         self.mfbd_patch_size = None
         self.mfbd_psf_size = None
         self.mfbd_jump_threshold = None
+        self.mfbd_binning = None
 
     def set_defaults(self):
         self.hidden_parameters_current_dir = expanduser("~")
@@ -128,9 +129,10 @@ class ConfigurationParameters(object):
         self.mfbd_activated = False
         self.mfbd_iterations = 8
         self.mfbd_frame_percent = 100
-        self.mfbd_patch_size = 64
+        self.mfbd_patch_size = 80
         self.mfbd_psf_size = 21
         self.mfbd_jump_threshold = 0.
+        self.mfbd_binning = 1
         self.set_defaults_ap_editing()
 
     def set_defaults_ap_editing(self):
@@ -210,6 +212,7 @@ class ConfigurationParameters(object):
         self.mfbd_patch_size = configuration_object.mfbd_patch_size
         self.mfbd_psf_size = configuration_object.mfbd_psf_size
         self.mfbd_jump_threshold = configuration_object.mfbd_jump_threshold
+        self.mfbd_binning = configuration_object.mfbd_binning
 
 
 class Configuration(object):
@@ -431,6 +434,7 @@ class Configuration(object):
         self.mfbd_patch_size = configuration_parameters.mfbd_patch_size
         self.mfbd_psf_size = configuration_parameters.mfbd_psf_size
         self.mfbd_jump_threshold = configuration_parameters.mfbd_jump_threshold
+        self.mfbd_binning = configuration_parameters.mfbd_binning
 
     def export_to_configuration_parameters(self, configuration_parameters):
         """
@@ -511,6 +515,7 @@ class Configuration(object):
         configuration_parameters.mfbd_patch_size = self.mfbd_patch_size
         configuration_parameters.mfbd_psf_size = self.mfbd_psf_size
         configuration_parameters.mfbd_jump_threshold = self.mfbd_jump_threshold
+        configuration_parameters.mfbd_binning = self.mfbd_binning
 
     def get_all_parameters_from_configparser(self, conf):
         """
@@ -627,6 +632,8 @@ class Configuration(object):
             default_conf_obj.mfbd_psf_size)
         self.mfbd_jump_threshold = get_from_conf(conf, 'Multi-frame blind deconvolution',
             'jump threshold', default_conf_obj.mfbd_jump_threshold)
+        self.mfbd_binning = get_from_conf(conf, 'Multi-frame blind deconvolution', 'binning',
+            default_conf_obj.mfbd_binning)
 
     def store_all_parameters_to_config_parser(self):
         """
@@ -735,6 +742,7 @@ class Configuration(object):
         self.set_parameter('Multi-frame blind deconvolution', 'psf size', str(self.mfbd_psf_size))
         self.set_parameter('Multi-frame blind deconvolution', 'jump threshold',
                            str(self.mfbd_jump_threshold))
+        self.set_parameter('Multi-frame blind deconvolution', 'binning', str(self.mfbd_binning))
 
     def set_parameter(self, section, name, value):
         """
@@ -768,9 +776,6 @@ class Configuration(object):
         # step on both sides.
         self.alignment_points_step_size = int(
             round((self.alignment_points_half_patch_width * 4.5) / 3))
-
-        # MFBD patches overlap by half a patch.
-        self.mfbd_patch_step = max(self.mfbd_patch_size // 2, 1)
 
         # Set the drizzling parameters.
         if self.stack_frames_drizzle_factor_string == "Off":
