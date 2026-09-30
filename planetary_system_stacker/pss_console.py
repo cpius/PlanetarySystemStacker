@@ -324,7 +324,6 @@ class PssConsole(QtCore.QObject):
         self.configuration.mfbd_iterations = arguments.mfbd_iterations
         self.configuration.mfbd_frame_percent = arguments.mfbd_percent
         self.configuration.mfbd_patch_size = arguments.mfbd_patch_size
-        self.configuration.mfbd_patch_step = max(arguments.mfbd_patch_size // 2, 1)
         self.configuration.mfbd_psf_size = arguments.mfbd_psf_size
         self.configuration.mfbd_jump_threshold = arguments.mfbd_jump
 

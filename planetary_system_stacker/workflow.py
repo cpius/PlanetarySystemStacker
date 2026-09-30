@@ -827,6 +827,7 @@ class Workflow(QtCore.QObject):
             try:
                 mfbd = MultiFrameBlindDeconvolution(self.configuration, self.frames,
                                                     self.rank_frames, self.align_frames,
+                                                    self.my_timer,
                                                     progress_signal=self.work_current_progress_signal,
                                                     logfile=self.attached_log_file)
                 self.mfbd_image = mfbd.deconvolve_and_transfer(self.stack_frames)

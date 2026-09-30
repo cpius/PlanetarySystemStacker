@@ -79,6 +79,12 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_percent = None
         self.alignment_points_frame_number = None
         self.stack_frames_drizzle_factor_string = None
+        self.mfbd_activated = None
+        self.mfbd_iterations = None
+        self.mfbd_frame_percent = None
+        self.mfbd_patch_size = None
+        self.mfbd_psf_size = None
+        self.mfbd_jump_threshold = None
 
     def set_defaults(self):
         self.hidden_parameters_current_dir = expanduser("~")
@@ -119,6 +125,12 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_percent = 10
         self.alignment_points_frame_number = -1
         self.stack_frames_drizzle_factor_string = "Off"
+        self.mfbd_activated = False
+        self.mfbd_iterations = 8
+        self.mfbd_frame_percent = 100
+        self.mfbd_patch_size = 64
+        self.mfbd_psf_size = 21
+        self.mfbd_jump_threshold = 0.
         self.set_defaults_ap_editing()
 
     def set_defaults_ap_editing(self):
@@ -192,6 +204,12 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_number = configuration_object.alignment_points_frame_number
         self.stack_frames_drizzle_factor_string = \
             configuration_object.stack_frames_drizzle_factor_string
+        self.mfbd_activated = configuration_object.mfbd_activated
+        self.mfbd_iterations = configuration_object.mfbd_iterations
+        self.mfbd_frame_percent = configuration_object.mfbd_frame_percent
+        self.mfbd_patch_size = configuration_object.mfbd_patch_size
+        self.mfbd_psf_size = configuration_object.mfbd_psf_size
+        self.mfbd_jump_threshold = configuration_object.mfbd_jump_threshold
 
 
 class Configuration(object):
@@ -249,16 +267,10 @@ class Configuration(object):
         self.stack_frames_background_fraction = 0.3
         self.stack_frames_background_patch_size = 100
 
-        # Multi-frame blind deconvolution (module mfbd), an alternative to shift-and-add stacking.
-        # Switched on per run (command line option "--mfbd"); sizes are in pixels of the frames.
-        self.mfbd_activated = False
+        # Fixed parameters of the multi-frame blind deconvolution (module mfbd). The parameters
+        # which the user can change are stored in the configuration object.
         self.mfbd_suffix = "_mfbd"
-        self.mfbd_iterations = 8
-        self.mfbd_frame_percent = 100
         self.mfbd_init_percent = 10.
-        self.mfbd_patch_size = 64
-        self.mfbd_patch_step = 32
-        self.mfbd_psf_size = 21
         self.mfbd_psf_iterations_first = 6
         self.mfbd_psf_iterations_later = 2
         self.mfbd_ratio_clip = 2.
@@ -267,7 +279,6 @@ class Configuration(object):
         self.mfbd_warp_order = 2
         self.mfbd_local_refresh = 8
         self.mfbd_local_max_shift = 4.
-        self.mfbd_jump_threshold = 0.
         self.mfbd_align_red_onto_green = True
 
         self.postproc_suffix = "_gpp"
@@ -414,6 +425,12 @@ class Configuration(object):
             configuration_parameters.alignment_points_frame_number
         self.stack_frames_drizzle_factor_string = \
             configuration_parameters.stack_frames_drizzle_factor_string
+        self.mfbd_activated = configuration_parameters.mfbd_activated
+        self.mfbd_iterations = configuration_parameters.mfbd_iterations
+        self.mfbd_frame_percent = configuration_parameters.mfbd_frame_percent
+        self.mfbd_patch_size = configuration_parameters.mfbd_patch_size
+        self.mfbd_psf_size = configuration_parameters.mfbd_psf_size
+        self.mfbd_jump_threshold = configuration_parameters.mfbd_jump_threshold
 
     def export_to_configuration_parameters(self, configuration_parameters):
         """
@@ -488,6 +505,12 @@ class Configuration(object):
             self.alignment_points_frame_number
         configuration_parameters.stack_frames_drizzle_factor_string = \
             self.stack_frames_drizzle_factor_string
+        configuration_parameters.mfbd_activated = self.mfbd_activated
+        configuration_parameters.mfbd_iterations = self.mfbd_iterations
+        configuration_parameters.mfbd_frame_percent = self.mfbd_frame_percent
+        configuration_parameters.mfbd_patch_size = self.mfbd_patch_size
+        configuration_parameters.mfbd_psf_size = self.mfbd_psf_size
+        configuration_parameters.mfbd_jump_threshold = self.mfbd_jump_threshold
 
     def get_all_parameters_from_configparser(self, conf):
         """
@@ -592,6 +615,19 @@ class Configuration(object):
         self.stack_frames_drizzle_factor_string = get_from_conf(conf, 'Stack frames',
             'drizzle factor string', default_conf_obj.stack_frames_drizzle_factor_string)
 
+        self.mfbd_activated = get_from_conf(conf, 'Multi-frame blind deconvolution', 'activated',
+            default_conf_obj.mfbd_activated)
+        self.mfbd_iterations = get_from_conf(conf, 'Multi-frame blind deconvolution', 'iterations',
+            default_conf_obj.mfbd_iterations)
+        self.mfbd_frame_percent = get_from_conf(conf, 'Multi-frame blind deconvolution',
+            'frame percent', default_conf_obj.mfbd_frame_percent)
+        self.mfbd_patch_size = get_from_conf(conf, 'Multi-frame blind deconvolution', 'patch size',
+            default_conf_obj.mfbd_patch_size)
+        self.mfbd_psf_size = get_from_conf(conf, 'Multi-frame blind deconvolution', 'psf size',
+            default_conf_obj.mfbd_psf_size)
+        self.mfbd_jump_threshold = get_from_conf(conf, 'Multi-frame blind deconvolution',
+            'jump threshold', default_conf_obj.mfbd_jump_threshold)
+
     def store_all_parameters_to_config_parser(self):
         """
         Write all variable parameters from the current configuration into a ConfigParser object.
@@ -688,6 +724,18 @@ class Configuration(object):
         self.set_parameter('Stack frames', 'drizzle factor string',
                            self.stack_frames_drizzle_factor_string)
 
+        self.config_parser_object.add_section('Multi-frame blind deconvolution')
+        self.set_parameter('Multi-frame blind deconvolution', 'activated', str(self.mfbd_activated))
+        self.set_parameter('Multi-frame blind deconvolution', 'iterations',
+                           str(self.mfbd_iterations))
+        self.set_parameter('Multi-frame blind deconvolution', 'frame percent',
+                           str(self.mfbd_frame_percent))
+        self.set_parameter('Multi-frame blind deconvolution', 'patch size',
+                           str(self.mfbd_patch_size))
+        self.set_parameter('Multi-frame blind deconvolution', 'psf size', str(self.mfbd_psf_size))
+        self.set_parameter('Multi-frame blind deconvolution', 'jump threshold',
+                           str(self.mfbd_jump_threshold))
+
     def set_parameter(self, section, name, value):
         """
         Assign a new value to a parameter in the configuration object. The value is not checked for
@@ -720,6 +768,9 @@ class Configuration(object):
         # step on both sides.
         self.alignment_points_step_size = int(
             round((self.alignment_points_half_patch_width * 4.5) / 3))
+
+        # MFBD patches overlap by half a patch.
+        self.mfbd_patch_step = max(self.mfbd_patch_size // 2, 1)
 
         # Set the drizzling parameters.
         if self.stack_frames_drizzle_factor_string == "Off":
