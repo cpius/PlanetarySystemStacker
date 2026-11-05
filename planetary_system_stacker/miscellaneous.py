@@ -1603,6 +1603,13 @@ class Miscellaneous(object):
         if configuration.stack_frames_drizzle_factor_string != "Off":
             parameters += [["Drizzle factor in stacking",
                             str(configuration.stack_frames_drizzle_factor_string)]]
+        else:
+            # Frequency weighting and sub-pixel stacking are only used without drizzling.
+            if configuration.stack_frames_fourier_weighting > 0.:
+                parameters += [["Frequency-dependent frame weighting",
+                                str(configuration.stack_frames_fourier_weighting)]]
+            if configuration.stack_frames_fourier_subpixel:
+                parameters += [["Sub-pixel accurate stacking", "True"]]
 
         output_string = "\n           Stacking parameters:                                       " \
                         "  | Value                        |\n" \

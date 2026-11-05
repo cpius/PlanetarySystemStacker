@@ -204,6 +204,17 @@ class PssConsole(QtCore.QObject):
                             help="Normalize frame brightness")
         parser.add_argument("--normalize_bco", type=normalize_bco_type, default=15,
                             help="Normalization black cut-off")
+        parser.add_argument("--fourier_weighting", type=float, default=0.,
+                            help="Frequency-dependent frame weighting strength (0 = off, 0.5 = "
+                                 "matched filter, 1 = stronger)")
+        parser.add_argument("--fourier_power", type=float, default=1.,
+                            help="How fast the weighting grows with frequency (1 = linear)")
+        parser.add_argument("--optics_cutoff", type=float, default=0.,
+                            help="Frequency scale of the weighting in cycles per pixel (0 = "
+                                 "estimate from the frames; about D/lambda = pixel size / "
+                                 "(wavelength * focal ratio))")
+        parser.add_argument("--fourier_subpixel", action="store_true",
+                            help="Stack AP patches with sub-pixel shifts (phase ramp, no drizzle)")
         parser.add_argument("--drizzle", choices=["Off", "1.5x", "2x", "3x"], default="Off",
                             help="Drizzle factor (Off, 1.5x, 2x, 3x)")
 
@@ -269,6 +280,10 @@ class PssConsole(QtCore.QObject):
         self.configuration.frames_normalization = arguments.normalize_bright
         self.configuration.frames_normalization_threshold = arguments.normalize_bco
         self.configuration.stack_frames_drizzle_factor_string = arguments.drizzle
+        self.configuration.stack_frames_fourier_weighting = arguments.fourier_weighting
+        self.configuration.stack_frames_fourier_power = arguments.fourier_power
+        self.configuration.stack_frames_optics_cutoff = arguments.optics_cutoff
+        self.configuration.stack_frames_fourier_subpixel = arguments.fourier_subpixel
 
         # Re-compute derived parameters after the configuration was changed.
         self.configuration.set_derived_parameters()

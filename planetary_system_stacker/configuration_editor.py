@@ -121,6 +121,8 @@ class ConfigurationEditor(QtWidgets.QFrame, Ui_ConfigurationDialog):
         self.sfdfs_comboBox.addItem('2x')
         self.sfdfs_comboBox.addItem('3x')
         self.sfdfs_comboBox.activated[str].connect(self.sfdfs_changed)
+        self.sffw_slider_value.valueChanged['int'].connect(self.sffw_changed)
+        self.sfsp_checkBox.stateChanged.connect(self.sfsp_changed)
 
         self.restore_standard_values.clicked.connect(self.restore_standard_parameters)
 
@@ -211,6 +213,12 @@ class ConfigurationEditor(QtWidgets.QFrame, Ui_ConfigurationDialog):
                                            QtCore.Qt.MatchFixedString)
         if index >= 0:
             self.sfdfs_comboBox.setCurrentIndex(index)
+        self.sffw_slider_value.setValue(
+            int(round(10. * self.config_copy.stack_frames_fourier_weighting)))
+        self.sffw_label_display.setText(
+            "%.1f" % self.config_copy.stack_frames_fourier_weighting)
+        self.sfsp_checkBox.setChecked(self.config_copy.stack_frames_fourier_subpixel)
+        self.sffw_activate_deactivate_widgets()
 
     def fgw_changed(self, value):
         """
@@ -270,6 +278,14 @@ class ConfigurationEditor(QtWidgets.QFrame, Ui_ConfigurationDialog):
             self.fnt_label_display.setEnabled(False)
             self.fnt_slider_value.setEnabled(False)
             self.fnt_label_parameter.setEnabled(False)
+
+    def sffw_activate_deactivate_widgets(self):
+        # Frequency weighting and sub-pixel stacking are not used together with drizzling.
+        enabled = self.config_copy.stack_frames_drizzle_factor_string == "Off"
+        self.sffw_label_parameter.setEnabled(enabled)
+        self.sffw_slider_value.setEnabled(enabled)
+        self.sffw_label_display.setEnabled(enabled)
+        self.sfsp_checkBox.setEnabled(enabled)
 
     def ipfn_activate_deactivate_widgets(self):
         if self.config_copy.global_parameters_parameters_in_filename:
@@ -424,6 +440,14 @@ class ConfigurationEditor(QtWidgets.QFrame, Ui_ConfigurationDialog):
 
     def sfdfs_changed(self, value):
         self.config_copy.stack_frames_drizzle_factor_string = value
+        self.sffw_activate_deactivate_widgets()
+
+    def sffw_changed(self, value):
+        self.config_copy.stack_frames_fourier_weighting = value / 10.
+        self.sffw_label_display.setText("%.1f" % self.config_copy.stack_frames_fourier_weighting)
+
+    def sfsp_changed(self, state):
+        self.config_copy.stack_frames_fourier_subpixel = (state == QtCore.Qt.Checked)
 
     def restore_standard_parameters(self):
         """
@@ -646,6 +670,20 @@ class ConfigurationEditor(QtWidgets.QFrame, Ui_ConfigurationDialog):
 
         if self.config_copy.stack_frames_drizzle_factor_string != self.configuration.stack_frames_drizzle_factor_string:
             self.configuration.stack_frames_drizzle_factor_string = self.config_copy.stack_frames_drizzle_factor_string
+            self.configuration.configuration_changed = True
+            go_back_to_activities.append('Stack frames')
+
+        if self.config_copy.stack_frames_fourier_weighting != \
+                self.configuration.stack_frames_fourier_weighting:
+            self.configuration.stack_frames_fourier_weighting = \
+                self.config_copy.stack_frames_fourier_weighting
+            self.configuration.configuration_changed = True
+            go_back_to_activities.append('Stack frames')
+
+        if self.config_copy.stack_frames_fourier_subpixel != \
+                self.configuration.stack_frames_fourier_subpixel:
+            self.configuration.stack_frames_fourier_subpixel = \
+                self.config_copy.stack_frames_fourier_subpixel
             self.configuration.configuration_changed = True
             go_back_to_activities.append('Stack frames')
 

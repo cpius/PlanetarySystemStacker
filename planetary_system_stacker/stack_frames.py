@@ -33,9 +33,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from cv2 import FONT_HERSHEY_SIMPLEX, putText, resize, INTER_CUBIC, INTER_LINEAR, \
-    waitKey, destroyAllWindows, imshow
+    waitKey, destroyAllWindows, imshow, sepFilter2D, BORDER_REFLECT, matchTemplate, minMaxLoc, \
+    TM_CCORR_NORMED
 from numpy import zeros, full, empty, float32, newaxis, arange, count_nonzero, \
     sqrt, uint16, clip, minimum, mean
+from numpy import fft as numpy_fft, hanning, hypot, exp, log, asarray, sinc, bincount, maximum, \
+    percentile
+from scipy.fft import dctn, idctn, rfft2 as scipy_rfft2
+from numpy import stack as numpy_stack
 # The following methods were moved from skimage to skimage.util.
 from skimage.util import img_as_uint, img_as_ubyte
 
@@ -92,9 +97,15 @@ class StackFrames(object):
         # Set a flag which indicates if drizzling is active.
         self.drizzle = self.configuration.drizzle_factor != 1
 
+        # Frequency-dependent frame weighting and sub-pixel stacking (see
+        # "prepare_fourier_weighting"). They work on the undrizzled frames only.
+        self.fourier = (self.configuration.stack_frames_fourier_weighting > 0. or
+                        self.configuration.stack_frames_fourier_subpixel) and not self.drizzle
+
         for name in ['Stacking: AP initialization', 'Stacking: initialize background blending',
                      'Stacking: compute AP shifts', 'Stacking: remapping and adding',
-                     'Stacking: computing background', 'Stacking: merging AP buffers']:
+                     'Stacking: computing background', 'Stacking: merging AP buffers',
+                     'Stacking: Fourier weighting quality', 'Stacking: Fourier weighting finish']:
             self.my_timer.create_no_check(name)
 
         self.my_timer.start('Stacking: AP initialization')
@@ -299,6 +310,10 @@ class StackFrames(object):
         # First find out if there are holes between AP patches.
         self.prepare_for_stack_blending()
 
+        # For frequency-dependent frame weighting, rank every frame at every AP it contributes to.
+        if self.fourier:
+            self.prepare_fourier_weighting()
+
         # Initialize the array for shift distribution statistics.
         self.shift_distribution = full((
             self.configuration.alignment_points_search_width *
@@ -380,6 +395,10 @@ class StackFrames(object):
             dy = self.align_frames.dy[frame_index]
             dx = self.align_frames.dx[frame_index]
 
+            # With frequency weighting, the shifted AP patches of this frame are collected and
+            # transformed together after the AP loop.
+            fourier_batch = []
+
             # Go through all alignment points for which this frame was found to be among the best.
             for alignment_point_index in self.frames.used_alignment_points[frame_index]:
                 alignment_point = self.alignment_points.alignment_points[alignment_point_index]
@@ -390,7 +409,8 @@ class StackFrames(object):
                     frame_mono_blurred, frame_index, alignment_point_index,
                     de_warp=self.configuration.alignment_points_de_warp,
                     weight_matrix_first_phase=weight_matrix_first_phase,
-                    subpixel_solve=self.drizzle)
+                    subpixel_solve=self.drizzle or (
+                        self.fourier and self.configuration.stack_frames_fourier_subpixel))
 
                 # The total shift consists of three components: different coordinate origins for
                 # current frame and mean frame, global shift of current frame, and the local warp
@@ -468,12 +488,27 @@ class StackFrames(object):
 
                 # Add the shifted alignment point patch to the AP's stacking buffer.
                 self.my_timer.start('Stacking: remapping and adding')
-                self.remap_rigid(self.frame_drizzled, alignment_point['stacking_buffer'],
-                                 total_shift_y_drizzled, total_shift_x_drizzled,
-                                 alignment_point['patch_y_low_drizzled'],
-                                 alignment_point['patch_y_high_drizzled'],
-                                 alignment_point['patch_x_low_drizzled'],
-                                 alignment_point['patch_x_high_drizzled'])
+                if self.fourier:
+                    # The integer shift leaves a sub-pixel residual (zero without sub-pixel solve).
+                    patch = self.fourier_patch(self.frame_drizzled, alignment_point,
+                                               total_shift_y_drizzled, total_shift_x_drizzled,
+                                               shift_y_drizzled - shift_y, shift_x_drizzled - shift_x)
+                    if self.fourier_weights:
+                        fourier_batch.append((alignment_point_index, patch))
+                    else:
+                        alignment_point['stacking_buffer'] += patch
+                else:
+                    self.remap_rigid(self.frame_drizzled, alignment_point['stacking_buffer'],
+                                     total_shift_y_drizzled, total_shift_x_drizzled,
+                                     alignment_point['patch_y_low_drizzled'],
+                                     alignment_point['patch_y_high_drizzled'],
+                                     alignment_point['patch_x_low_drizzled'],
+                                     alignment_point['patch_x_high_drizzled'])
+                self.my_timer.stop('Stacking: remapping and adding')
+
+            if fourier_batch:
+                self.my_timer.start('Stacking: remapping and adding')
+                self.fourier_accumulate(frame_index, fourier_batch)
                 self.my_timer.stop('Stacking: remapping and adding')
 
             # If there are holes between AP patches, add this frame's contribution (if any) to the
@@ -501,6 +536,10 @@ class StackFrames(object):
             prof.disable()
             stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
             stats.print_stats()
+
+        # Turn the frequency-weighted sums into the AP stacking buffers.
+        if self.fourier:
+            self.finish_fourier_weighting()
 
         if self.progress_signal is not None:
             self.progress_signal.emit("Stack frames", 100)
@@ -532,6 +571,328 @@ class StackFrames(object):
             # Divide the buffer by the number of contributions.
             self.averaged_background /= self.alignment_points.stack_size
             self.my_timer.stop('Stacking: computing background')
+
+    def prepare_fourier_weighting(self):
+        """
+        Prepare frequency-dependent frame weighting. Instead of adding the shifted AP patches of
+        the selected frames with equal weights, every patch is cosine transformed (the Fourier
+        transform of its mirror extension) and each spatial frequency f gets the weight
+
+            w(f) = q ** (strength * (min(f, 0.9 f_c) / f_q) ** power)   (w = 1 beyond f_c),
+
+        normalized over the frames. f_c is a frequency scale in cycles per pixel, of the order of
+        the optical cutoff D / lambda (estimated from the frames unless the hidden parameter
+        "stack_frames_optics_cutoff" is set, see "estimate_frequency_scale"), q the frame's
+        noise-corrected power in the band 0.22 - 0.61 f_c at this AP, relative to the median over
+        the AP's frames (clipped to 0.25 - 4), and f_q the band center. At low frequencies all
+        frames count alike, at high frequencies the sharp frames dominate. With a Gaussian-like
+        OTF, strength 0.5 and power 2 weight every frequency by the frame's own transfer (a matched
+        filter); strength 1 and power 1 (the default power) worked best on the test videos.
+
+        This method computes q for every frame at every AP it contributes to (on the globally
+        aligned monochrome frame), and allocates the accumulation buffers.
+
+        :return: -
+        """
+
+        self.my_timer.start('Stacking: Fourier weighting quality')
+        strength = self.configuration.stack_frames_fourier_weighting
+        cutoff = self.configuration.stack_frames_optics_cutoff
+        if strength > 0. and cutoff <= 0.:
+            cutoff = self.estimate_frequency_scale()
+            if self.configuration.global_parameters_protocol_level > 1:
+                Miscellaneous.protocol("           Fourier weighting: frequency scale estimated "
+                                       "from the frames: " + str(round(cutoff, 3)) +
+                                       " cycles/pixel", None, precede_with_timestamp=False)
+        power = self.configuration.stack_frames_fourier_power
+        band_low, band_high = 0.22 * cutoff, 0.61 * cutoff
+        band_center = 0.5 * (band_low + band_high)
+        self.fourier_weights = strength > 0.
+        self.lanczos_cache = {}
+
+        # APs with the same patch shape form a group: their patches are transformed together, and
+        # they share the frequency grids, masks and weight exponents.
+        self.fourier_groups = {}
+        for alignment_point_index, alignment_point in \
+                enumerate(self.alignment_points.alignment_points):
+            shape = (alignment_point['patch_y_high'] - alignment_point['patch_y_low'],
+                     alignment_point['patch_x_high'] - alignment_point['patch_x_low'])
+            group = self.fourier_groups.setdefault(shape, {'members': []})
+            alignment_point['fourier_group'] = shape
+            alignment_point['fourier_position'] = len(group['members'])
+            alignment_point['fourier_signal'] = {}
+            alignment_point['fourier_noise'] = []
+            group['members'].append(alignment_point_index)
+        if self.fourier_weights:
+            for (size_y, size_x), group in self.fourier_groups.items():
+                frequency = hypot(numpy_fft.fftfreq(size_y)[:, newaxis],
+                                  numpy_fft.rfftfreq(size_x)[newaxis, :])
+                group['in_band'] = (frequency >= band_low) & (frequency < band_high)
+                group['noise_band'] = frequency > cutoff
+                group['window'] = (hanning(size_y)[:, newaxis] *
+                                   hanning(size_x)[newaxis, :]).astype(float32)
+                # Patches are weighted in the cosine (DCT-II) domain: that is the Fourier transform
+                # of the patch's mirror extension, which has no jumps at the patch borders, so the
+                # weights do not wrap one border's content into the opposite one. Index j along an
+                # axis of length n is the frequency j / (2 n) cycles per pixel.
+                frequency_cosine = hypot((arange(size_y) / (2. * size_y))[:, newaxis],
+                                         (arange(size_x) / (2. * size_x))[newaxis, :])
+                exponent = strength * (minimum(frequency_cosine, 0.9 * cutoff) /
+                                       band_center) ** power
+                exponent[frequency_cosine > cutoff] = 0.
+                group['exponent'] = exponent.astype(float32)
+                members = len(group['members'])
+                group['numerator'] = zeros((members, size_y, size_x, 3) if self.frames.color
+                                           else (members, size_y, size_x))
+                group['denominator'] = zeros((members, size_y, size_x))
+
+            # Rank every frame at every AP it contributes to, on the globally aligned mono frame.
+            if self.configuration.frames_normalization:
+                median_brightness = median([self.frames.average_brightness(index)
+                                            for index in range(self.frames.number)])
+            for frame_index in range(self.frames.number):
+                if not self.frames.used_alignment_points[frame_index]:
+                    continue
+                frame_mono = self.frames.frames_mono(frame_index).astype(float32)
+                if self.configuration.frames_normalization:
+                    frame_mono *= median_brightness / \
+                                  (self.frames.average_brightness(frame_index) + 1.e-7)
+                dy = self.align_frames.dy[frame_index]
+                dx = self.align_frames.dx[frame_index]
+                patches = {}
+                for alignment_point_index in self.frames.used_alignment_points[frame_index]:
+                    alignment_point = self.alignment_points.alignment_points[alignment_point_index]
+                    patches.setdefault(alignment_point['fourier_group'], []).append(
+                        (alignment_point, frame_mono[alignment_point['patch_y_low'] + dy:
+                                                     alignment_point['patch_y_high'] + dy,
+                                                     alignment_point['patch_x_low'] + dx:
+                                                     alignment_point['patch_x_high'] + dx]))
+                for shape, items in patches.items():
+                    group = self.fourier_groups[shape]
+                    spectra = abs(scipy_rfft2(numpy_stack([patch for _, patch in items]) *
+                                              group['window'], axes=(1, 2), workers=-1)) ** 2
+                    noise = spectra[:, group['noise_band']].mean(axis=1) if \
+                        group['noise_band'].any() else zeros(len(items))
+                    signal = spectra[:, group['in_band']].mean(axis=1) - noise
+                    for (alignment_point, _), value, noise_value in zip(items, signal, noise):
+                        alignment_point['fourier_signal'][frame_index] = float(value)
+                        alignment_point['fourier_noise'].append(float(noise_value))
+
+        # Translate the band power into the relative frame quality q at each AP. Where the band is
+        # not well above the noise (e.g. an AP mostly on the sky) all frames get the same weight.
+        for alignment_point in self.alignment_points.alignment_points:
+            signals = alignment_point['fourier_signal']
+            alignment_point['fourier_log_quality'] = {}
+            if signals:
+                median_signal = median(signals.values())
+                if median_signal > 0. and \
+                        median_signal >= 2. * median(alignment_point['fourier_noise']):
+                    alignment_point['fourier_log_quality'] = {
+                        index: float(log(min(max(value / median_signal, 0.25), 4.)))
+                        for index, value in signals.items()}
+            del alignment_point['fourier_signal'], alignment_point['fourier_noise']
+        if strength > 0. and self.configuration.global_parameters_protocol_level > 1:
+            spreads = [float(exp(asarray(list(
+                alignment_point['fourier_log_quality'].values()))).std())
+                for alignment_point in self.alignment_points.alignment_points
+                if alignment_point['fourier_log_quality']]
+            Miscellaneous.protocol("           Fourier weighting: frames ranked at " +
+                                   str(len(spreads)) + " of " +
+                                   str(len(self.alignment_points.alignment_points)) +
+                                   " APs, median spread (std) of the frame quality " +
+                                   (str(round(median(spreads), 3)) if spreads else "-"),
+                                   None, precede_with_timestamp=False)
+        self.my_timer.stop('Stacking: Fourier weighting quality')
+
+    def estimate_frequency_scale(self, box=96, search=8, max_aps=8, max_frames=120):
+        """
+        Estimate the frequency scale of the weighting (the "optics cutoff" parameter) from the
+        frames: the spatial frequency where the coherence between the AP boxes of pairs of frames
+        (globally aligned, then locally by an integer shift) falls below 0.1, times 2.25. Coherence
+        is the ring-averaged cross power of the two frames over their mean power; it measures how
+        far out a single frame still carries signal above its noise. The factor is empirical: on
+        test videos from four rigs it reproduced the best fixed scale (0.7 - 1.4 times D / lambda).
+
+        :param box: Box size (pixels) for the spectra
+        :param search: Local search radius (pixels) for the integer alignment of each box
+        :param max_aps: Number of APs used (those whose boxes are brightest throughout)
+        :param max_frames: Number of frames used (consecutive pairs from the start of the video)
+        :return: Frequency scale in cycles per pixel
+        """
+
+        mean_frame = self.alignment_points.mean_frame.astype(float32)
+        size_y, size_x = mean_frame.shape[:2]
+        half = box // 2
+        candidates = [alignment_point for alignment_point in self.alignment_points.alignment_points
+                      if half + search <= alignment_point['y'] < size_y - half - search and
+                      half + search <= alignment_point['x'] < size_x - half - search]
+        # Prefer boxes that lie entirely on the bright disk: the limb is a sharp, stable edge that
+        # stays coherent far beyond the frequencies where the disk detail does.
+        candidates = sorted(candidates, key=lambda alignment_point: -percentile(
+            mean_frame[alignment_point['y'] - half:alignment_point['y'] + half,
+                       alignment_point['x'] - half:alignment_point['x'] + half], 10))[:max_aps]
+        if not candidates:
+            return 0.25
+        window = (hanning(box)[:, newaxis] * hanning(box)[newaxis, :]).astype(float32)
+        frequency = hypot(numpy_fft.fftfreq(box)[:, newaxis], numpy_fft.rfftfreq(box)[newaxis, :])
+        ring = minimum((frequency * box).astype(int), box // 2)
+        auto = zeros(ring.shape); cross = zeros(ring.shape)
+        previous = {}
+        for frame_index in range(min(self.frames.number, max_frames)):
+            frame_mono = self.frames.frames_mono(frame_index).astype(float32)
+            frame_blurred = self.frames.frames_mono_blurred(frame_index).astype(float32)
+            dy = self.align_frames.dy[frame_index]
+            dx = self.align_frames.dx[frame_index]
+            for ap_number, alignment_point in enumerate(candidates):
+                y, x = alignment_point['y'], alignment_point['x']
+                reference = mean_frame[y - half:y + half, x - half:x + half]
+                window_y, window_x = y - half - search + dy, x - half - search + dx
+                if window_y < 0 or window_x < 0 or window_y + box + 2 * search > \
+                        frame_mono.shape[0] or window_x + box + 2 * search > frame_mono.shape[1]:
+                    continue
+                result = matchTemplate(frame_blurred[window_y:window_y + box + 2 * search,
+                                       window_x:window_x + box + 2 * search], reference,
+                                       TM_CCORR_NORMED)
+                _, _, _, (best_x, best_y) = minMaxLoc(result)
+                patch = frame_mono[window_y + best_y:window_y + best_y + box,
+                                   window_x + best_x:window_x + best_x + box]
+                spectrum = numpy_fft.rfft2((patch - patch.mean()) * window)
+                auto += abs(spectrum) ** 2
+                if ap_number in previous:
+                    cross += (spectrum * previous[ap_number].conj()).real
+                previous[ap_number] = spectrum
+        counts = bincount(ring.ravel(), minlength=box // 2 + 1)
+        coherence = bincount(ring.ravel(), cross.ravel(), box // 2 + 1) / \
+                    maximum(bincount(ring.ravel(), auto.ravel(), box // 2 + 1), 1.e-30)
+        coherence[counts == 0] = 0.
+        threshold = 0.1
+        for index in range(2, box // 2 + 1):
+            if coherence[index] < threshold:
+                # Interpolate linearly between the rings below and above the threshold.
+                above = coherence[index - 1]
+                fraction = (above - threshold) / max(above - coherence[index], 1.e-9)
+                crossing = (index - 1 + min(max(fraction, 0.), 1.)) / box
+                return float(min(max(2.25 * crossing, 0.05), 0.7))
+        return 0.7
+
+    def fourier_patch(self, frame, alignment_point, shift_y, shift_x, residual_y, residual_x):
+        """
+        Counterpart of "remap_rigid" for frequency weighting and sub-pixel stacking: cut the AP
+        patch out of the frame with the given integer shift (replicating edge pixels where the patch
+        reaches beyond the frame), and apply the sub-pixel residual shift by Lanczos-3
+        interpolation.
+
+        :param frame: frame to be stacked
+        :param alignment_point: alignment point
+        :param shift_y: Integer shift in y direction between frame stack and current frame
+        :param shift_x: Integer shift in x direction between frame stack and current frame
+        :param residual_y: Sub-pixel shift still to be applied in y direction
+        :param residual_x: Sub-pixel shift still to be applied in x direction
+        :return: The shifted patch (float32)
+        """
+
+        frame_size_y, frame_size_x = frame.shape[0], frame.shape[1]
+        size_y = alignment_point['patch_y_high'] - alignment_point['patch_y_low']
+        size_x = alignment_point['patch_x_high'] - alignment_point['patch_x_low']
+        y_low = alignment_point['patch_y_low'] + shift_y
+        x_low = alignment_point['patch_x_low'] + shift_x
+        y_high, x_high = y_low + size_y, x_low + size_x
+
+        # Same border bookkeeping as in "remap_rigid": incomplete borders are trimmed later.
+        if y_low < 0 or x_low < 0 or y_high > frame_size_y or x_high > frame_size_x:
+            self.border_y_low = max(self.border_y_low, -y_low)
+            self.border_y_high = max(self.border_y_high, y_high - frame_size_y)
+            self.border_x_low = max(self.border_x_low, -x_low)
+            self.border_x_high = max(self.border_x_high, x_high - frame_size_x)
+
+        # For a sub-pixel shift, cut out a few pixels more for the interpolation kernel.
+        margin = 4 if (residual_y or residual_x) else 0
+        y_low, y_high, x_low, x_high = y_low - margin, y_high + margin, x_low - margin, \
+                                       x_high + margin
+        if y_low >= 0 and x_low >= 0 and y_high <= frame_size_y and x_high <= frame_size_x:
+            patch = frame[y_low:y_high, x_low:x_high]
+        else:
+            patch = frame[clip(arange(y_low, y_high), 0, frame_size_y - 1)][
+                    :, clip(arange(x_low, x_high), 0, frame_size_x - 1)]
+        if margin:
+            patch = sepFilter2D(patch, -1, self.lanczos_taps(residual_x),
+                                self.lanczos_taps(residual_y), borderType=BORDER_REFLECT)[
+                    margin:margin + size_y, margin:margin + size_x]
+        return patch
+
+    def fourier_accumulate(self, frame_index, batch):
+        """
+        Add one frame's shifted AP patches to the frequency-weighted sums: the patches of each
+        group (equal shape) are cosine transformed together, weighted with the frame's quality at
+        each AP, and added to the group's accumulation buffers.
+
+        :param frame_index: frame index (to look up the frame's quality at each AP)
+        :param batch: list of (alignment point index, shifted patch) of this frame
+        :return: -
+        """
+
+        by_group = {}
+        for alignment_point_index, patch in batch:
+            alignment_point = self.alignment_points.alignment_points[alignment_point_index]
+            by_group.setdefault(alignment_point['fourier_group'], []).append(
+                (alignment_point['fourier_position'],
+                 alignment_point['fourier_log_quality'].get(frame_index, 0.), patch))
+        for shape, items in by_group.items():
+            group = self.fourier_groups[shape]
+            positions = [position for position, _, _ in items]
+            log_quality = asarray([value for _, value, _ in items], dtype=float32)
+            coefficients = dctn(numpy_stack([patch for _, _, patch in items]), type=2,
+                                axes=(1, 2), norm='ortho', workers=-1)
+            weights = exp(group['exponent'][newaxis] * log_quality[:, newaxis, newaxis])
+            coefficients *= weights[..., newaxis] if self.frames.color else weights
+            group['numerator'][positions] += coefficients
+            group['denominator'][positions] += weights
+
+    def lanczos_taps(self, shift):
+        """
+        Separable Lanczos-3 interpolation taps for a sub-pixel shift: filtering with them (OpenCV
+        correlation, anchor at the center tap) gives out(y) = in(y + shift). The taps are cached,
+        with the shift rounded to 1/512 pixel.
+
+        :param shift: Shift in pixels, between -0.5 and 0.5
+        :return: Seven normalized taps (float32)
+        """
+
+        key = int(round(shift * 512.))
+        taps = self.lanczos_cache.get(key)
+        if taps is None:
+            x = arange(-3, 4) - key / 512.
+            taps = sinc(x) * sinc(x / 3.)
+            taps[abs(x) >= 3.] = 0.
+            taps = (taps / taps.sum()).astype(float32)
+            self.lanczos_cache[key] = taps
+        return taps
+
+    def finish_fourier_weighting(self):
+        """
+        Turn the cosine-domain accumulation buffers into AP stacking buffers that hold "stack_size"
+        times the weighted mean, as the plain stacking buffers hold the sum over the stacked frames.
+        (Sub-pixel stacking without weighting adds the patches to the stacking buffers directly.)
+
+        :return: -
+        """
+
+        self.my_timer.start('Stacking: Fourier weighting finish')
+        if self.fourier_weights:
+            for group in self.fourier_groups.values():
+                denominator = group['denominator']
+                if self.frames.color:
+                    denominator = denominator[..., newaxis]
+                buffers = idctn(group['numerator'] / (denominator + 1.e-30), type=2, axes=(1, 2),
+                                norm='ortho', workers=-1) * self.alignment_points.stack_size
+                for position, alignment_point_index in enumerate(group['members']):
+                    self.alignment_points.alignment_points[alignment_point_index][
+                        'stacking_buffer'] = buffers[position].astype(float32)
+        for alignment_point in self.alignment_points.alignment_points:
+            for key in ('fourier_group', 'fourier_position', 'fourier_log_quality'):
+                alignment_point.pop(key, None)
+        self.fourier_groups = None
+        self.my_timer.stop('Stacking: Fourier weighting finish')
 
     def remap_rigid(self, frame, buffer, shift_y, shift_x, y_low, y_high, x_low, x_high):
         """

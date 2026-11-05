@@ -79,6 +79,8 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_percent = None
         self.alignment_points_frame_number = None
         self.stack_frames_drizzle_factor_string = None
+        self.stack_frames_fourier_weighting = None
+        self.stack_frames_fourier_subpixel = None
 
     def set_defaults(self):
         self.hidden_parameters_current_dir = expanduser("~")
@@ -119,6 +121,8 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_percent = 10
         self.alignment_points_frame_number = -1
         self.stack_frames_drizzle_factor_string = "Off"
+        self.stack_frames_fourier_weighting = 0.
+        self.stack_frames_fourier_subpixel = False
         self.set_defaults_ap_editing()
 
     def set_defaults_ap_editing(self):
@@ -192,6 +196,8 @@ class ConfigurationParameters(object):
         self.alignment_points_frame_number = configuration_object.alignment_points_frame_number
         self.stack_frames_drizzle_factor_string = \
             configuration_object.stack_frames_drizzle_factor_string
+        self.stack_frames_fourier_weighting = configuration_object.stack_frames_fourier_weighting
+        self.stack_frames_fourier_subpixel = configuration_object.stack_frames_fourier_subpixel
 
 
 class Configuration(object):
@@ -248,6 +254,12 @@ class Configuration(object):
         self.stack_frames_background_blend_threshold = 0.2
         self.stack_frames_background_fraction = 0.3
         self.stack_frames_background_patch_size = 100
+
+        # Frequency-dependent frame weighting in AP stacking (see
+        # StackFrames.prepare_fourier_weighting): how fast the weights sharpen with frequency, and
+        # the frequency scale ("optics cutoff", cycles per pixel; 0. = estimate from the frames).
+        self.stack_frames_fourier_power = 1.
+        self.stack_frames_optics_cutoff = 0.
 
         self.postproc_suffix = "_gpp"
         self.postproc_max_layers = 10
@@ -393,6 +405,9 @@ class Configuration(object):
             configuration_parameters.alignment_points_frame_number
         self.stack_frames_drizzle_factor_string = \
             configuration_parameters.stack_frames_drizzle_factor_string
+        self.stack_frames_fourier_weighting = \
+            configuration_parameters.stack_frames_fourier_weighting
+        self.stack_frames_fourier_subpixel = configuration_parameters.stack_frames_fourier_subpixel
 
     def export_to_configuration_parameters(self, configuration_parameters):
         """
@@ -467,6 +482,9 @@ class Configuration(object):
             self.alignment_points_frame_number
         configuration_parameters.stack_frames_drizzle_factor_string = \
             self.stack_frames_drizzle_factor_string
+        configuration_parameters.stack_frames_fourier_weighting = \
+            self.stack_frames_fourier_weighting
+        configuration_parameters.stack_frames_fourier_subpixel = self.stack_frames_fourier_subpixel
 
     def get_all_parameters_from_configparser(self, conf):
         """
@@ -570,6 +588,10 @@ class Configuration(object):
 
         self.stack_frames_drizzle_factor_string = get_from_conf(conf, 'Stack frames',
             'drizzle factor string', default_conf_obj.stack_frames_drizzle_factor_string)
+        self.stack_frames_fourier_weighting = get_from_conf(conf, 'Stack frames',
+            'fourier weighting', default_conf_obj.stack_frames_fourier_weighting)
+        self.stack_frames_fourier_subpixel = get_from_conf(conf, 'Stack frames',
+            'fourier subpixel', default_conf_obj.stack_frames_fourier_subpixel)
 
     def store_all_parameters_to_config_parser(self):
         """
@@ -666,6 +688,10 @@ class Configuration(object):
         self.config_parser_object.add_section('Stack frames')
         self.set_parameter('Stack frames', 'drizzle factor string',
                            self.stack_frames_drizzle_factor_string)
+        self.set_parameter('Stack frames', 'fourier weighting',
+                           str(self.stack_frames_fourier_weighting))
+        self.set_parameter('Stack frames', 'fourier subpixel',
+                           str(self.stack_frames_fourier_subpixel))
 
     def set_parameter(self, section, name, value):
         """
